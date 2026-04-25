@@ -1,0 +1,18 @@
+# amlc build artifacts
+yent
+yent.c
+*.gguf
+
+# weights — local only, downloaded via Makefile
+weights/*.bin
+weights/*.gguf
+weights/*.pt
+weights/*.pkl
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# OS
+.DS_Store

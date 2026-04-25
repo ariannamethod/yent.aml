@@ -1,0 +1,57 @@
+# yent.aml — Yent SFT 176M Janus inference, expressed in AML.
+#
+# First docking step: AML compiles to native through amlc, links against
+# libnotorch + libaml from /opt/homebrew, drives Yent's BPE tokenizer
+# (32759 vocab, 32503 merges) through nt_bpe_init/encode/decode.
+#
+# Forward pass and 12-step resonance live in subsequent BLOOD blocks
+# layered into this same file. For now we verify the end-to-end pipeline:
+#   .aml  →  amlc → C  →  cc + libnotorch + Accelerate  →  ./yent
+# By Arianna Method. הרזוננס לא נשבר
+
+ECHO "tools/janus_v4_bpe_merges.h"
+
+BLOOD COMPILE yent_headers {
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <ariannamethod/notorch.h>
+}
+
+BLOOD COMPILE yent_tokenizer_round_trip {
+/* Stage-1 wiring: encode a prompt through Yent's BPE, print the token IDs,
+ * decode them back, and verify the round-trip is byte-identical. The
+ * encoder is the same one infer_v4.c uses for prompt processing — so this
+ * is also a sanity check that our tokenizer state matches what the
+ * weights were trained against. */
+static int yent_tokenize(const char *prompt) {
+    nt_bpe bpe;
+    nt_bpe_init(&bpe, janus_v4_bpe_merges, JANUS_V4_BPE_MERGES);
+    fprintf(stderr, "[yent] BPE ready: vocab=%d, merges=%d\n",
+            bpe.vocab_size, bpe.n_merges);
+
+    int tokens[1024];
+    int n = nt_bpe_encode(&bpe, prompt, (int)strlen(prompt), tokens, 1024);
+    fprintf(stderr, "[yent] prompt: \"%s\"\n", prompt);
+    fprintf(stderr, "[yent] encoded %d tokens:", n);
+    for (int i = 0; i < n; i++) fprintf(stderr, " %d", tokens[i]);
+    fprintf(stderr, "\n");
+
+    char decoded[4096];
+    int dlen = nt_bpe_decode(&bpe, tokens, n, decoded, sizeof(decoded) - 1);
+    decoded[dlen] = 0;
+    fprintf(stderr, "[yent] decoded (%d bytes): \"%s\"\n", dlen, decoded);
+
+    int ok = (strcmp(prompt, decoded) == 0);
+    fprintf(stderr, "[yent] round-trip: %s\n", ok ? "OK" : "MISMATCH");
+    return ok ? 0 : 1;
+}
+}
+
+BLOOD MAIN {
+int main(int argc, char **argv) {
+    const char *prompt = (argc > 1) ? argv[1]
+                                    : "Q: Who are you?\nA:";
+    return yent_tokenize(prompt);
+}
+}
