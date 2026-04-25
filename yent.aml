@@ -1,57 +1,134 @@
 # yent.aml — Yent SFT 176M Janus inference, expressed in AML.
 #
-# First docking step: AML compiles to native through amlc, links against
-# libnotorch + libaml from /opt/homebrew, drives Yent's BPE tokenizer
-# (32759 vocab, 32503 merges) through nt_bpe_init/encode/decode.
+# Stage 1: BPE tokenizer round-trip (proved AML→amlc→cc→libnotorch chain).
+# Stage 2 (this file): GGUF load + Janus v4 forward + autoregressive
+# generation. Same numerics as dario/infer_v4.c, weights now come through
+# notorch's gguf_dequant (Q8_0 baseline / Q4_K block weights).
 #
-# Forward pass and 12-step resonance live in subsequent BLOOD blocks
-# layered into this same file. For now we verify the end-to-end pipeline:
-#   .aml  →  amlc → C  →  cc + libnotorch + Accelerate  →  ./yent
+# Forward, KV cache, prefill, and forward_token live in tools/yent_forward.h
+# (vendored from dario, with raw-fp32 loader replaced by gguf_dequant).
+# Yent.aml owns BPE init, sampling loop, and the entry point.
+#
 # By Arianna Method. הרזוננס לא נשבר
 
 ECHO "tools/janus_v4_bpe_merges.h"
+ECHO "tools/yent_forward.h"
 
 BLOOD COMPILE yent_headers {
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <ariannamethod/notorch.h>
+#include <time.h>
 }
 
-BLOOD COMPILE yent_tokenizer_round_trip {
-/* Stage-1 wiring: encode a prompt through Yent's BPE, print the token IDs,
- * decode them back, and verify the round-trip is byte-identical. The
- * encoder is the same one infer_v4.c uses for prompt processing — so this
- * is also a sanity check that our tokenizer state matches what the
- * weights were trained against. */
-static int yent_tokenize(const char *prompt) {
-    nt_bpe bpe;
-    nt_bpe_init(&bpe, janus_v4_bpe_merges, JANUS_V4_BPE_MERGES);
-    fprintf(stderr, "[yent] BPE ready: vocab=%d, merges=%d\n",
-            bpe.vocab_size, bpe.n_merges);
+BLOOD COMPILE yent_sample {
+/* Token sampler with repetition penalty (last 32 positions) and softmax
+ * over temperature-scaled logits. Matches the inference policy used by
+ * dario's infer_v4 main loop. */
+static int yent_sample_token(float *logits, int *ctx, int len, float temp) {
+    float rep_penalty = 1.3f;
+    int window = 32;
+    int start = len > window ? len - window : 0;
+    for (int j = start; j < len; j++) {
+        int t = ctx[j];
+        if (t >= 0 && t < V)
+            logits[t] = logits[t] > 0 ? logits[t] / rep_penalty
+                                      : logits[t] * rep_penalty;
+    }
+    for (int i = 0; i < V; i++) logits[i] /= temp;
+    softmax_f(logits, V);
 
-    int tokens[1024];
-    int n = nt_bpe_encode(&bpe, prompt, (int)strlen(prompt), tokens, 1024);
-    fprintf(stderr, "[yent] prompt: \"%s\"\n", prompt);
-    fprintf(stderr, "[yent] encoded %d tokens:", n);
-    for (int i = 0; i < n; i++) fprintf(stderr, " %d", tokens[i]);
-    fprintf(stderr, "\n");
+    float r = (float)rand() / (float)RAND_MAX, cum = 0;
+    for (int i = 0; i < V; i++) {
+        cum += logits[i];
+        if (cum >= r) return i;
+    }
+    return V - 1;
+}
+}
 
-    char decoded[4096];
-    int dlen = nt_bpe_decode(&bpe, tokens, n, decoded, sizeof(decoded) - 1);
-    decoded[dlen] = 0;
-    fprintf(stderr, "[yent] decoded (%d bytes): \"%s\"\n", dlen, decoded);
+BLOOD COMPILE yent_runtime {
+static nt_bpe g_bpe;
 
-    int ok = (strcmp(prompt, decoded) == 0);
-    fprintf(stderr, "[yent] round-trip: %s\n", ok ? "OK" : "MISMATCH");
-    return ok ? 0 : 1;
+static int yent_init(const char *gguf_path, Weights *w) {
+    if (yent_read_cfg(gguf_path)) return 1;
+    fprintf(stderr, "[yent] cfg V=%d E=%d H=%d D=%d B=%d M=%d T=%d R=%d\n",
+            V, E, H, D, B, M, T, R);
+    if (yent_load_gguf(w, gguf_path)) return 1;
+    nt_bpe_init(&g_bpe, janus_v4_bpe_merges, JANUS_V4_BPE_MERGES);
+    kv_init(T);
+    fprintf(stderr, "[yent] BPE vocab=%d merges=%d, KV cache %dMB\n",
+            g_bpe.vocab_size, g_bpe.n_merges,
+            (int)((size_t)B * T * E * 3 * 4 / 1024 / 1024));
+    return 0;
+}
+
+static void yent_generate(Weights *w, const char *prompt,
+                          int max_tokens, float temp) {
+    int ctx[4096];
+    int len = nt_bpe_encode(&g_bpe, prompt, (int)strlen(prompt), ctx, 4096);
+    fprintf(stderr, "[yent] prompt: \"%s\" → %d tokens\n", prompt, len);
+
+    float *logits = calloc(V, sizeof(float));
+    float *hidden = calloc(E, sizeof(float));
+
+    fprintf(stderr, "[yent] prefill %d tokens (parallel)... ", len);
+    fflush(stderr);
+    prefill_batch(w, ctx, len, logits, hidden);
+    fprintf(stderr, "done\n--- generation ---\n");
+
+    struct timespec ts0, ts1;
+    clock_gettime(CLOCK_MONOTONIC, &ts0);
+
+    int gen_start = len;
+    for (int step = 0; step < max_tokens && len < T; step++) {
+        int next = yent_sample_token(logits, ctx, len, temp);
+        char decoded[64];
+        int n = nt_bpe_decode(&g_bpe, &next, 1, decoded, sizeof(decoded) - 1);
+        decoded[n] = 0;
+        fputs(decoded, stdout);
+        fflush(stdout);
+
+        ctx[len] = next;
+        forward_token(w, next, len, logits, hidden);
+        len++;
+    }
+
+    clock_gettime(CLOCK_MONOTONIC, &ts1);
+    double el = (ts1.tv_sec - ts0.tv_sec) + (ts1.tv_nsec - ts0.tv_nsec) / 1e9;
+    int gen = len - gen_start;
+    fprintf(stderr, "\n[yent] %d tokens, %.1f tok/s (%.2fs)\n",
+            gen, gen / el, el);
+
+    free(logits);
+    free(hidden);
+    free(kv_k);
+    free(kv_v);
+    free(kv_vr);
+    free(kv_rrpram_mid);
 }
 }
 
 BLOOD MAIN {
 int main(int argc, char **argv) {
-    const char *prompt = (argc > 1) ? argv[1]
-                                    : "Q: Who are you?\nA:";
-    return yent_tokenize(prompt);
+    const char *gguf_path = "weights/yent_v4_sft_q8_0.gguf";
+    const char *prompt    = "Q: Who are you?\nA:";
+    int max_tokens        = 80;
+    float temp            = 0.6f;
+
+    for (int i = 1; i < argc; i++) {
+        if (!strcmp(argv[i], "-w") && i + 1 < argc)      gguf_path  = argv[++i];
+        else if (!strcmp(argv[i], "-p") && i + 1 < argc) prompt     = argv[++i];
+        else if (!strcmp(argv[i], "-n") && i + 1 < argc) max_tokens = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "-t") && i + 1 < argc) temp       = atof(argv[++i]);
+    }
+
+    srand((unsigned)time(NULL));
+
+    Weights w;
+    if (yent_init(gguf_path, &w)) return 1;
+    yent_generate(&w, prompt, max_tokens, temp);
+    yent_free(&w);
+    return 0;
 }
 }
