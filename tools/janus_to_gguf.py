@@ -276,11 +276,40 @@ def write_gguf(path: str, kvs: list, tensors: list) -> None:
 
 
 # ── Janus weight reader ────────────────────────────────────────────────────
-def read_janus_bin(path: str, cfg: dict):
-    """Stream raw fp32 .bin in infer_v4.c order, yield (name, shape, fp32 array)."""
-    V, E, H, D, B, M, T, R = (cfg[k] for k in "VEHDBMTR")
+JANU_MAGIC = bytes.fromhex("554e414a")  # 'UNAJ' on disk == 0x4A414E55 LE
 
+
+def read_janus_bin(path: str, cfg: dict):
+    """Stream raw fp32 .bin in infer_v4.c order, yield (name, shape, fp32 array).
+
+    Two on-disk layouts are supported, matching infer_v4.c:
+      - JANU v4: 256-byte header (magic + version + V,E,H,D,B,M,T,n_params +
+        padding), weights start at offset 256. Header values override --V/E/...
+      - Legacy: 8 plain ints (V,E,H,D,B,M,T,R) header + raw fp32.
+    """
     with open(path, "rb") as f:
+        magic = f.read(4)
+        if magic == JANU_MAGIC:
+            version = struct.unpack("<i", f.read(4))[0]
+            hdr = struct.unpack("<8i", f.read(32))
+            V, E, H, D, B, M, T, n_params = hdr
+            # Derive R from n_params (formula from infer_v4.c)
+            fixed = 66 + 2 * V * E + B * (6 * E * E + 3 * H + 3 * M * E)
+            R = (n_params - fixed) // (B * H * (E + T))
+            print(f"[janus_to_gguf] JANU v{version} header: "
+                  f"V={V} E={E} H={H} D={D} B={B} M={M} T={T} R={R} "
+                  f"n_params={n_params}")
+            cfg.update(dict(V=V, E=E, H=H, D=D, B=B, M=M, T=T, R=R))
+            f.seek(256)  # weights start at offset 256
+        else:
+            # Legacy: 8 plain ints already partially consumed
+            rest = f.read(28)
+            hdr = struct.unpack("<8i", magic + rest)
+            V, E, H, D, B, M, T, R = hdr
+            print(f"[janus_to_gguf] legacy header: "
+                  f"V={V} E={E} H={H} D={D} B={B} M={M} T={T} R={R}")
+            cfg.update(dict(V=V, E=E, H=H, D=D, B=B, M=M, T=T, R=R))
+
         def take(n_floats):
             buf = f.read(n_floats * 4)
             if len(buf) != n_floats * 4:
