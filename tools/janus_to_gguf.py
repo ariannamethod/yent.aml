@@ -330,10 +330,20 @@ KEEP_F32 = {
     "backout_lambda",
     "smear_gate.weight",
 }
+# Embedding-style tensors. Their distribution is wider than block weights
+# (some rare tokens carry large activations) so 4-bit quant degrades
+# generation quality noticeably. Keep at Q8_0 baseline even when --quant
+# selects something more aggressive — the size hit is ~25 MB on 176M.
+KEEP_AT_Q8 = {
+    "transformer.wte.weight",
+    "lm_head.weight",
+}
 def _is_kept_f32(name: str) -> bool:
     if name in KEEP_F32: return True
     if name.endswith(".attn.gate"): return True
     return False
+def _is_embedding(name: str) -> bool:
+    return name in KEEP_AT_Q8
 
 
 def main():
@@ -353,22 +363,35 @@ def main():
     print(f"[janus_to_gguf] cfg = {cfg}")
     print(f"[janus_to_gguf] quant = {args.quant} (block={block}, type={gtype})")
 
+    q8_gtype, q8_quantize, q8_block = QUANTIZERS["q8_0"]
+
     tensors = []
     total_params = 0
     for name, shape, w in read_janus_bin(args.input, cfg):
         n = w.size
         total_params += n
 
-        if _is_kept_f32(name) or n % block != 0:
+        if _is_kept_f32(name) or n % q8_block != 0:
             data = w.astype(np.float32).tobytes()
             tensor_type = GGML_TYPE_F32
+            label = "f32"
+        elif _is_embedding(name) and args.quant != "q8_0" and args.quant != "f16" \
+                and args.quant != "f32":
+            # Always at least Q8_0 baseline for embedding tensors
+            data = q8_quantize(w)
+            tensor_type = q8_gtype
+            label = "q8_0"
+        elif n % block != 0:
+            data = w.astype(np.float32).tobytes()
+            tensor_type = GGML_TYPE_F32
+            label = "f32"
         else:
             data = quantize(w)
             tensor_type = gtype
+            label = args.quant
 
         tensors.append((name, shape, tensor_type, data))
-        suffix = " [f32]" if tensor_type == GGML_TYPE_F32 else f" [{args.quant}]"
-        print(f"  {name:50s} {str(shape):20s} {n:>11d} elems{suffix}")
+        print(f"  {name:50s} {str(shape):20s} {n:>11d} elems [{label}]")
 
     print(f"[janus_to_gguf] total {total_params/1e6:.2f}M params from {args.input}")
 
