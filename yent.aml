@@ -51,15 +51,33 @@ static int _cmp_probidx_desc(const void *a, const void *b) {
 
 static int yent_sample_token(float *logits, int *ctx, int len,
                              float temp, float top_p) {
-    /* Repetition penalty over the last 32 positions */
-    float rep_penalty = 1.3f;
-    int window = 32;
+    /* Repetition penalty over the last 64 positions (1.4× stronger than
+     * dario's default 1.3 / 32, since the field overlay can re-amplify
+     * recently-seen tokens). */
+    float rep_penalty = 1.4f;
+    int window = 64;
     int start = len > window ? len - window : 0;
     for (int j = start; j < len; j++) {
         int t = ctx[j];
         if (t >= 0 && t < V)
             logits[t] = logits[t] > 0 ? logits[t] / rep_penalty
                                       : logits[t] * rep_penalty;
+    }
+
+    /* No-repeat 3-gram block: forbid any token T such that the suffix
+     * (ctx[len-2], ctx[len-1], T) has appeared earlier in ctx. Without
+     * this guard the field's bigram chain can latch into "X Y X Y"
+     * loops. With it, those patterns are mathematically unreachable.
+     * Cheap (linear scan over context) and visibly cleans up output
+     * without warping the underlying distribution. */
+    if (len >= 2) {
+        int a = ctx[len - 2], b = ctx[len - 1];
+        for (int j = 0; j + 2 < len; j++) {
+            if (ctx[j] == a && ctx[j + 1] == b) {
+                int forbid = ctx[j + 2];
+                if (forbid >= 0 && forbid < V) logits[forbid] = -1e30f;
+            }
+        }
     }
 
     /* AML Dario field — Hebbian + prophecy + destiny + 6 Kuramoto chambers
