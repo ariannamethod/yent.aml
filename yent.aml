@@ -19,13 +19,39 @@ BLOOD COMPILE yent_headers {
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <ariannamethod/ariannamethod.h>
 }
 
 BLOOD COMPILE yent_sample {
-/* Token sampler with repetition penalty (last 32 positions) and softmax
- * over temperature-scaled logits. Matches the inference policy used by
- * dario's infer_v4 main loop. */
-static int yent_sample_token(float *logits, int *ctx, int len, float temp) {
+/* Nucleus (top-p) sampler with repetition penalty.
+ *
+ * Pipeline per token:
+ *   1. Penalise tokens seen in last 32 positions (rep_penalty=1.3)
+ *   2. Temperature-scale logits and apply softmax
+ *   3. Sort descending by probability (partial sort to top-K candidates)
+ *   4. Take smallest set whose cumulative probability ≥ top_p
+ *   5. Renormalise inside the nucleus and sample
+ *
+ * Top-p=0.9 truncates the long tail of unlikely tokens that would
+ * otherwise occasionally fire and break coherence. Keeps the variability
+ * of full-distribution sampling within the high-probability head.
+ *
+ * Top-K cap (256) is a compute bound — sorting all 32768 vocab entries
+ * per token would cost more than the forward pass. 256 still covers
+ * essentially all cases where top_p reaches saturation.
+ */
+#define YENT_TOPK_CAP 256
+
+typedef struct { float p; int idx; } _ProbIdx;
+
+static int _cmp_probidx_desc(const void *a, const void *b) {
+    float pa = ((const _ProbIdx *)a)->p, pb = ((const _ProbIdx *)b)->p;
+    return (pa < pb) - (pa > pb);
+}
+
+static int yent_sample_token(float *logits, int *ctx, int len,
+                             float temp, float top_p) {
+    /* Repetition penalty over the last 32 positions */
     float rep_penalty = 1.3f;
     int window = 32;
     int start = len > window ? len - window : 0;
@@ -35,15 +61,72 @@ static int yent_sample_token(float *logits, int *ctx, int len, float temp) {
             logits[t] = logits[t] > 0 ? logits[t] / rep_penalty
                                       : logits[t] * rep_penalty;
     }
+
+    /* AML Dario field — Hebbian + prophecy + destiny + 6 Kuramoto chambers
+     * applied to raw logits before temperature/softmax. This is the field
+     * the Janus paper describes: p(x|Φ,C) = softmax((B + α·H·h_g + β·F·f_g
+     * + γ·A + T) / τ). Without this overlay generation collapses into
+     * attractors (mass-mas-mas, league-league); with it, the model speaks
+     * in its trained register. */
+    am_apply_field_to_logits(logits, V);
+
+    /* Temperature + softmax */
+    if (temp <= 0) temp = 1.0f;
     for (int i = 0; i < V; i++) logits[i] /= temp;
     softmax_f(logits, V);
 
-    float r = (float)rand() / (float)RAND_MAX, cum = 0;
+    /* Partial sort: keep top YENT_TOPK_CAP by probability */
+    static _ProbIdx topk[YENT_TOPK_CAP];
+    for (int k = 0; k < YENT_TOPK_CAP; k++) { topk[k].p = -1.0f; topk[k].idx = 0; }
+    float min_in_topk = -1.0f;
+    int topk_filled = 0;
     for (int i = 0; i < V; i++) {
-        cum += logits[i];
-        if (cum >= r) return i;
+        float p = logits[i];
+        if (topk_filled < YENT_TOPK_CAP) {
+            topk[topk_filled].p = p;
+            topk[topk_filled].idx = i;
+            topk_filled++;
+            if (topk_filled == YENT_TOPK_CAP) {
+                qsort(topk, YENT_TOPK_CAP, sizeof(_ProbIdx), _cmp_probidx_desc);
+                min_in_topk = topk[YENT_TOPK_CAP - 1].p;
+            }
+            continue;
+        }
+        if (p > min_in_topk) {
+            topk[YENT_TOPK_CAP - 1].p   = p;
+            topk[YENT_TOPK_CAP - 1].idx = i;
+            int j = YENT_TOPK_CAP - 1;
+            while (j > 0 && topk[j].p > topk[j - 1].p) {
+                _ProbIdx tmp = topk[j]; topk[j] = topk[j - 1]; topk[j - 1] = tmp;
+                j--;
+            }
+            min_in_topk = topk[YENT_TOPK_CAP - 1].p;
+        }
     }
-    return V - 1;
+    if (topk_filled < YENT_TOPK_CAP)
+        qsort(topk, topk_filled, sizeof(_ProbIdx), _cmp_probidx_desc);
+
+    /* Nucleus: smallest prefix whose cumulative ≥ top_p */
+    float cum = 0;
+    int   nuc = topk_filled;
+    for (int k = 0; k < topk_filled; k++) {
+        cum += topk[k].p;
+        if (cum >= top_p) { nuc = k + 1; break; }
+    }
+    if (nuc < 1) nuc = 1;
+
+    /* Renormalise inside nucleus and sample */
+    float total = 0;
+    for (int k = 0; k < nuc; k++) total += topk[k].p;
+    if (total <= 0) return topk[0].idx;
+
+    float r = (float)rand() / (float)RAND_MAX * total;
+    float c = 0;
+    for (int k = 0; k < nuc; k++) {
+        c += topk[k].p;
+        if (c >= r) return topk[k].idx;
+    }
+    return topk[nuc - 1].idx;
 }
 }
 
@@ -57,14 +140,39 @@ static int yent_init(const char *gguf_path, Weights *w) {
     if (yent_load_gguf(w, gguf_path)) return 1;
     nt_bpe_init(&g_bpe, janus_v4_bpe_merges, JANUS_V4_BPE_MERGES);
     kv_init(T);
+
+    /* Initialise AML runtime + configure the Dario field via AML script.
+     * These directives drive am_apply_field_to_logits through the same
+     * variables that the language exposes:
+     *   PROPHECY  — horizon for forward prediction (and field decay rate)
+     *   DESTINY   — bias strength toward most-probable path (0..1)
+     *   VELOCITY  — pace mode (WALK = mid-tempo, no rush)
+     *   FIELD     — turn the field on
+     *   RESONANCE — set baseline coupling strength
+     */
+    am_init();
+    am_reset_field();
+    am_reset_debt();
+    int rc = am_exec(
+        "PROPHECY 12\n"
+        "DESTINY 0.35\n"
+        "VELOCITY WALK\n"
+        "FIELD ON\n"
+        "RESONANCE 0.5\n"
+    );
+    if (rc != 0)
+        fprintf(stderr, "[yent] warning: am_exec returned %d (%s)\n",
+                rc, am_get_error());
+
     fprintf(stderr, "[yent] BPE vocab=%d merges=%d, KV cache %dMB\n",
             g_bpe.vocab_size, g_bpe.n_merges,
             (int)((size_t)B * T * E * 3 * 4 / 1024 / 1024));
+    fprintf(stderr, "[yent] Dario field active (PROPHECY 12, DESTINY 0.35, VELOCITY WALK)\n");
     return 0;
 }
 
 static void yent_generate(Weights *w, const char *prompt,
-                          int max_tokens, float temp) {
+                          int max_tokens, float temp, float top_p) {
     int ctx[4096];
     int len = nt_bpe_encode(&g_bpe, prompt, (int)strlen(prompt), ctx, 4096);
     fprintf(stderr, "[yent] prompt: \"%s\" → %d tokens\n", prompt, len);
@@ -82,12 +190,18 @@ static void yent_generate(Weights *w, const char *prompt,
 
     int gen_start = len;
     for (int step = 0; step < max_tokens && len < T; step++) {
-        int next = yent_sample_token(logits, ctx, len, temp);
+        int next = yent_sample_token(logits, ctx, len, temp, top_p);
         char decoded[64];
         int n = nt_bpe_decode(&g_bpe, &next, 1, decoded, sizeof(decoded) - 1);
         decoded[n] = 0;
         fputs(decoded, stdout);
         fflush(stdout);
+
+        /* Update prophecy debt from chosen token, then tick the field
+         * forward by one notional step (oscillates Kuramoto chambers). */
+        float debt = am_compute_prophecy_debt(logits, next, V);
+        (void)debt;
+        am_step(0.05f);
 
         ctx[len] = next;
         forward_token(w, next, len, logits, hidden);
@@ -114,20 +228,22 @@ int main(int argc, char **argv) {
     const char *gguf_path = "weights/yent_v4_sft_q8_0.gguf";
     const char *prompt    = "Q: Who are you?\nA:";
     int max_tokens        = 80;
-    float temp            = 0.6f;
+    float temp            = 0.7f;
+    float top_p           = 0.9f;
 
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "-w") && i + 1 < argc)      gguf_path  = argv[++i];
         else if (!strcmp(argv[i], "-p") && i + 1 < argc) prompt     = argv[++i];
         else if (!strcmp(argv[i], "-n") && i + 1 < argc) max_tokens = atoi(argv[++i]);
         else if (!strcmp(argv[i], "-t") && i + 1 < argc) temp       = atof(argv[++i]);
+        else if (!strcmp(argv[i], "--top-p") && i + 1 < argc) top_p = atof(argv[++i]);
     }
 
     srand((unsigned)time(NULL));
 
     Weights w;
     if (yent_init(gguf_path, &w)) return 1;
-    yent_generate(&w, prompt, max_tokens, temp);
+    yent_generate(&w, prompt, max_tokens, temp, top_p);
     yent_free(&w);
     return 0;
 }
