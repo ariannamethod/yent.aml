@@ -189,11 +189,31 @@ static int yent_init(const char *gguf_path, Weights *w) {
     return 0;
 }
 
+/* Janus chat-format special tokens (from chain_dialogue.py:30-31).
+ * Yent SFT 177M was trained on:
+ *   [BOS, USER_START] + bpe(question) + [USER_END, ASST_START] → answer → [ASST_END]
+ * Plain "Q:/A:" is OUT OF DISTRIBUTION for this checkpoint and produces
+ * fragmented poetic instead of coherent prose. */
+#define YENT_BOS         32759
+#define YENT_USER_START  32760
+#define YENT_USER_END    32761
+#define YENT_ASST_START  32762
+#define YENT_ASST_END    32763
+
 static void yent_generate(Weights *w, const char *prompt,
                           int max_tokens, float temp, float top_p) {
     int ctx[4096];
-    int len = nt_bpe_encode(&g_bpe, prompt, (int)strlen(prompt), ctx, 4096);
-    fprintf(stderr, "[yent] prompt: \"%s\" → %d tokens\n", prompt, len);
+    int len = 0;
+    /* Wrap prompt in Janus chat tokens — what Yent SFT 177M was trained on. */
+    ctx[len++] = YENT_BOS;
+    ctx[len++] = YENT_USER_START;
+    int n_prompt_bpe = nt_bpe_encode(&g_bpe, prompt, (int)strlen(prompt),
+                                     ctx + len, 4096 - len - 2);
+    len += n_prompt_bpe;
+    ctx[len++] = YENT_USER_END;
+    ctx[len++] = YENT_ASST_START;
+    fprintf(stderr, "[yent] chat-format prompt: %d BPE tokens "
+                    "(+4 special) → %d total\n", n_prompt_bpe, len);
 
     float *logits = calloc(V, sizeof(float));
     float *hidden = calloc(E, sizeof(float));
@@ -209,6 +229,13 @@ static void yent_generate(Weights *w, const char *prompt,
     int gen_start = len;
     for (int step = 0; step < max_tokens && len < T; step++) {
         int next = yent_sample_token(logits, ctx, len, temp, top_p);
+
+        /* Stop on assistant end-of-turn (or any other special token). */
+        if (next == YENT_ASST_END) {
+            fprintf(stderr, "\n[yent] hit ASST_END at step %d\n", step);
+            break;
+        }
+
         char decoded[64];
         int n = nt_bpe_decode(&g_bpe, &next, 1, decoded, sizeof(decoded) - 1);
         decoded[n] = 0;
