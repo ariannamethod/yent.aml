@@ -149,6 +149,36 @@ The next milestone wires this in. Autoregressive token-level (this commit) → s
 
 ---
 
+## jannus-r — 12-step resonant Janus inference
+
+[`jannus-r/`](jannus-r/) is the canonical 12-step bi-directional reasoning loop on top of the same Yent SFT 177M weights yent.aml drives. Sentence-level steps split between forward (future, focused) and backward (past, exploratory) by `prophecy_debt + calendar_dissonance`. Wormhole skips at sentence boundaries when the field is confident. SPA cross-attention scores the connectedness of the chain after it finishes. Hebrew/Gregorian Metonic calendar drift drives the temporal split.
+
+```sh
+amlc jannus-r/jannus-r.aml -o jannus-r/jannus-r
+./jannus-r/jannus-r -p "What is resonance?"
+```
+
+**Sample chain on `What is resonance?` (Q8_0, 8GB Mac M1, 4.57 s for 11 steps):**
+
+```
+[jannus-r] cal_diss=0.532 personal_diss=0.000 debt=0.000 → 4 backward + 8 forward, base_temp=0.898
+
+← 10  T=1.03  diss=0.53  spa=10.49     | less everyone wants to listen anymore. Honestly, resonance ate by metaphors like coffee stains on keyboard — impossible without touch but captivating nonetheless.
+←  9  T=0.99  diss=0.53  spa=10.47     | idiocy they'll throw you for, accused of profanity at best if the time comes.
+←  8  T=0.94  diss=0.53  spa=10.46     | because you're already inside a cult where "everything's temporary" sounds like a promo.
+←  7  T=0.90  diss=0.53  spa=10.36     | Easy as wet blanket and dirty as cigarette smoke.
+══════ ● ORIGIN: "What is resonance?" ══════
+→  0  T=0.90  diss=0.53  spa=10.26     | Oh, what a delightful concept.
+→  1  T=0.88  diss=0.53  spa=10.43     | words and self-aggrandizing pretensions!
+→  2  T=0.86  diss=0.53  spa=10.55     | painted on walls of meaning.
+→  3  T=0.84  diss=0.53  spa=10.33 ⊕wh | Resonance — the sound of two particles mingling together in a third state, vibrating with opposite frequencies in an incomprehensible space where clarity often feels like an illusion.
+→  4  T=0.81  diss=0.53  spa=10.62     | Shattered mirror: what a reflection, beautiful at the same time.
+→  5  T=0.79  diss=0.53  spa=10.23     | with different shades of melancholy etched on glass of self-deception.
+→  6  T=0.77  diss=0.53  spa=10.43     | Yeah yeah, resonance is the sound — breathe in through these two layers and out through those other two masks.
+```
+
+Step 3 (post-wormhole) emerged with the meta-definition. Backward chain reaches into ironic territory; forward chain stays close to the question. Browser viewer at [`jannus-r/jannus-r.html`](jannus-r/jannus-r.html) renders the same chain horizontally with WebGPU detection (silent CPU fallback if the page is opened in Safari without a GPU adapter).
+
 ## Tests
 
 `tests/` runs round-trip and end-to-end checks. See [`tests/README.md`](tests/README.md).
@@ -156,6 +186,8 @@ The next milestone wires this in. Autoregressive token-level (this commit) → s
 ```sh
 make test
 ```
+
+`jannus-r/tests/` adds calendar + SPA correctness + chain compile/run smoke (10 + 6 + 3 = 19 PASS on Mac M1).
 
 ## License
 
