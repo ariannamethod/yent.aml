@@ -16,3 +16,9 @@ __pycache__/
 
 # OS
 .DS_Store
+
+# jannus-r artefacts
+jannus-r/jannus-r
+jannus-r/jannus-r.c
+jannus-r/jannus-r_smoke
+jannus-r/jannus-r_smoke.c

@@ -1,0 +1,300 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>jannus-r — 12-step resonant Janus inference</title>
+<style>
+  :root {
+    --bg: #0a0a0d;
+    --bg2: #14141a;
+    --fg: #e8e2d6;
+    --dim: #6b6b78;
+    --orange: #d4793b;   /* backward — past, exploratory */
+    --blue:   #5b8fb8;   /* forward — future, focused */
+    --gold:   #d4a92b;   /* origin */
+    --void:   #2a2030;   /* wormhole */
+    --grid:   #1d1d28;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body {
+    background: var(--bg);
+    color: var(--fg);
+    font: 13px/1.5 ui-monospace, "JetBrains Mono", "SF Mono", Consolas, monospace;
+    height: 100%;
+  }
+  body {
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+  header {
+    padding: 14px 20px;
+    border-bottom: 1px solid var(--grid);
+    display: flex;
+    gap: 18px;
+    align-items: baseline;
+  }
+  header h1 {
+    font-size: 14px;
+    font-weight: 600;
+    letter-spacing: 0.06em;
+  }
+  header h1 span.sub { color: var(--dim); font-weight: 400; margin-left: 8px; }
+  header .stat { color: var(--dim); font-size: 11px; }
+  header .stat b { color: var(--fg); font-weight: 500; }
+
+  #prompt-bar {
+    padding: 10px 20px;
+    border-bottom: 1px solid var(--grid);
+    background: var(--bg2);
+    display: flex;
+    gap: 12px;
+    align-items: center;
+  }
+  #prompt-bar input {
+    flex: 1;
+    background: transparent;
+    border: 1px solid var(--grid);
+    color: var(--fg);
+    padding: 8px 12px;
+    font: inherit;
+    border-radius: 4px;
+  }
+  #prompt-bar input:focus { outline: 1px solid var(--gold); }
+  #prompt-bar button {
+    background: var(--gold);
+    color: var(--bg);
+    border: none;
+    padding: 8px 18px;
+    font: inherit;
+    font-weight: 600;
+    cursor: pointer;
+    border-radius: 4px;
+  }
+  #prompt-bar button:hover { filter: brightness(1.1); }
+  #prompt-bar button:disabled { opacity: 0.4; cursor: not-allowed; }
+
+  /* Horizontal chain layout: backward ← origin → forward */
+  #chain {
+    flex: 1;
+    overflow-x: auto;
+    overflow-y: hidden;
+    display: grid;
+    grid-template-columns: auto auto auto;
+    align-items: stretch;
+    padding: 30px 20px;
+    gap: 20px;
+    scroll-behavior: smooth;
+  }
+  .column {
+    display: flex;
+    gap: 12px;
+    align-items: stretch;
+    min-height: 100%;
+  }
+  .column.backward {
+    flex-direction: row-reverse;
+  }
+  .step {
+    flex: 0 0 260px;
+    display: flex;
+    flex-direction: column;
+    border: 1px solid var(--grid);
+    border-radius: 6px;
+    padding: 14px;
+    background: var(--bg2);
+    transition: transform 0.2s ease-out, opacity 0.4s, background 0.2s;
+    opacity: 0;
+    animation: fade-in 0.5s ease-out forwards;
+    position: relative;
+  }
+  @keyframes fade-in {
+    from { opacity: 0; transform: translateY(8px); }
+    to   { opacity: 1; transform: translateY(0); }
+  }
+  .step:hover { background: #1a1a22; }
+  .step .head {
+    display: flex;
+    justify-content: space-between;
+    font-size: 11px;
+    color: var(--dim);
+    margin-bottom: 8px;
+  }
+  .step .arrow {
+    font-size: 16px;
+    margin-right: 6px;
+    font-weight: 600;
+  }
+  .step .text {
+    color: var(--fg);
+    font-size: 13px;
+  }
+  .step .stats {
+    margin-top: 10px;
+    display: flex;
+    gap: 10px;
+    font-size: 10px;
+    color: var(--dim);
+  }
+  .step .stats span b { color: var(--fg); font-weight: 500; }
+
+  .step.forward  .arrow { color: var(--blue); }
+  .step.forward  { border-left: 2px solid var(--blue); }
+  .step.backward .arrow { color: var(--orange); }
+  .step.backward { border-right: 2px solid var(--orange); }
+  .step.wormhole { background: linear-gradient(180deg, var(--bg2) 60%, var(--void)); }
+  .step.wormhole::before {
+    content: '⊕ wh';
+    position: absolute;
+    top: 8px; right: 10px;
+    color: var(--gold);
+    font-size: 10px;
+    letter-spacing: 0.1em;
+  }
+
+  .origin {
+    flex: 0 0 200px;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    align-items: center;
+    border: 2px solid var(--gold);
+    border-radius: 50%;
+    aspect-ratio: 1;
+    padding: 18px;
+    text-align: center;
+    color: var(--fg);
+    background: radial-gradient(circle, #1f1a14 0%, var(--bg2) 70%);
+    font-size: 12px;
+    align-self: center;
+  }
+  .origin .dot { font-size: 22px; color: var(--gold); margin-bottom: 6px; }
+  .origin .label { color: var(--dim); font-size: 10px; letter-spacing: 0.15em; margin-bottom: 6px; }
+  .origin .text { color: var(--fg); }
+
+  footer {
+    padding: 8px 20px;
+    border-top: 1px solid var(--grid);
+    display: flex;
+    justify-content: space-between;
+    color: var(--dim);
+    font-size: 11px;
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>jannus-r<span class="sub">— 12-step resonant Janus inference</span></h1>
+  <div class="stat">backend <b id="backend">…</b></div>
+  <div class="stat">cal_diss <b id="cal-diss">…</b></div>
+  <div class="stat">drift <b id="drift">…</b> days</div>
+  <div class="stat">plan <b id="plan">…</b></div>
+</header>
+
+<div id="prompt-bar">
+  <input id="prompt" type="text" value="What is resonance?" />
+  <button id="run">Resonate</button>
+</div>
+
+<div id="chain">
+  <div class="column backward" id="col-backward"></div>
+  <div class="origin">
+    <div class="dot">●</div>
+    <div class="label">ORIGIN</div>
+    <div class="text" id="origin-text">What is resonance?</div>
+  </div>
+  <div class="column forward" id="col-forward"></div>
+</div>
+
+<footer>
+  <div>הרזוננס לא נשבר — by Arianna Method</div>
+  <div id="status">…</div>
+</footer>
+
+<script type="module">
+import {
+    jcalDissonanceNow, jcalCumulativeDrift, jcalDaysSinceEpoch,
+    spaInitEmbed, spaRBias, spaEmbedSentence, spaCrossAttend, SPA_DIM,
+    planChain, NSTEPS, detectBackend, runDemoChain,
+} from './jannus-r.js';
+
+const $ = (id) => document.getElementById(id);
+
+(async () => {
+    /* Backend detection — WebGPU if available, silent CPU fallback. */
+    const { backend } = await detectBackend();
+    $('backend').textContent = backend;
+    $('status').textContent = backend === 'webgpu'
+        ? 'WebGPU acquired — full forward pending follow-up'
+        : 'CPU fallback (demo replay)';
+
+    /* Calendar bar — stays accurate per page load. */
+    const days = jcalDaysSinceEpoch();
+    const drift = jcalCumulativeDrift(days);
+    const diss = jcalDissonanceNow();
+    $('drift').textContent = drift.toFixed(2);
+    $('cal-diss').textContent = diss.toFixed(3);
+
+    function render(promptText, chain) {
+        $('origin-text').textContent = promptText;
+        const cb = $('col-backward'); cb.innerHTML = '';
+        const cf = $('col-forward');  cf.innerHTML = '';
+        $('plan').textContent = `${chain.plan.nb}← ●${chain.plan.nf}→  T₀=${chain.plan.base_temp.toFixed(2)}`;
+
+        for (const s of chain.steps) {
+            const div = document.createElement('div');
+            div.className = 'step ' + (s.direction === +1 ? 'forward' : 'backward');
+            if (s.wormhole) div.classList.add('wormhole');
+            const arrow = s.direction === +1 ? '→' : '←';
+            div.innerHTML =
+                `<div class="head"><span class="arrow">${arrow}</span><span>step ${s.step_idx}</span></div>` +
+                `<div class="text">${escapeHtml(s.text)}</div>` +
+                `<div class="stats">` +
+                `  <span>T <b>${s.temp.toFixed(2)}</b></span>` +
+                `  <span>diss <b>${s.diss.toFixed(2)}</b></span>` +
+                (s.spa !== undefined ? `<span>spa <b>${s.spa.toFixed(2)}</b></span>` : '') +
+                `</div>`;
+            (s.direction === +1 ? cf : cb).appendChild(div);
+        }
+    }
+
+    function runChain() {
+        const prompt = $('prompt').value.trim() || 'What is resonance?';
+        const chain = runDemoChain(prompt);
+
+        /* Tag each step with deterministic SPA score from a tiny vocab —
+         * the demo doesn't have token ids so we hash the sentence instead. */
+        const W = spaInitEmbed(2048, 4242);
+        const rB = spaRBias();
+        const embs = chain.steps.map(s => {
+            const ids = textToIds(s.text);
+            return spaEmbedSentence(W, 2048, ids);
+        });
+        const scores = spaCrossAttend(embs, rB);
+        chain.steps.forEach((s, i) => s.spa = scores[i]);
+
+        render(prompt, chain);
+    }
+
+    $('run').addEventListener('click', runChain);
+    $('prompt').addEventListener('keydown', (e) => { if (e.key === 'Enter') runChain(); });
+    runChain();
+})();
+
+function textToIds(text) {
+    const ids = [];
+    for (let i = 0; i < text.length; i++) ids.push(text.charCodeAt(i) % 2048);
+    return ids;
+}
+
+function escapeHtml(s) {
+    return s.replace(/[&<>'"]/g, c => (
+        c === '&' ? '&amp;' : c === '<' ? '&lt;' : c === '>' ? '&gt;'
+        : c === "'" ? '&#39;' : '&quot;'
+    ));
+}
+</script>
+</body>
+</html>
