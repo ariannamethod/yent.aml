@@ -22,10 +22,27 @@
 
 static int V, E, H, D, B, M, T, R;
 
-/* ── BLAS-accelerated matmul via notorch ── */
+/* ── BLAS-accelerated matmul via notorch ──
+ *
+ * Two paths:
+ *   mm_t(C, A, B, m, k, n) — cblas_sgemm. Used when m > 1 (prefill_batch
+ *     processes the whole prompt as a [n_tokens, E] batch).
+ *   matvec_t(out, W, x, n, k) — cblas_sgemv. Used in the per-token hot
+ *     loop where each Linear is effectively (1×E) @ (E×N). sgemv is
+ *     better tuned than sgemm with m=1 on Apple Accelerate.
+ *
+ * Old infer_v4.c used mm_t for both paths — that predates notorch's
+ * nt_blas_matvec API (added in commit 59327ba). yent_forward.h picks
+ * the right path per call. */
 static void mm_t(float *C, const float *A, const float *BT, int m, int k, int n) {
     /* C[m,n] = A[m,k] @ BT[n,k]^T — BT is stored transposed */
     nt_blas_mmT(C, A, BT, m, k, n);
+}
+
+/* out[n] = W[n,k] @ x[k]  (sgemv path). W is stored row-major as [n, k],
+ * matching how nn.Linear weights ship in PyTorch state_dict (out, in). */
+static void matvec_t(float *out, const float *W, const float *x, int n, int k) {
+    nt_blas_matvec(out, W, x, n, k);
 }
 
 /* notorch ops — used directly for single-vector operations */
@@ -374,7 +391,7 @@ static void prefill_batch(Weights *w, int *toks, int n, float *logits, float *hi
     float rn_final[1024];
     rmsnorm(rn_final, xs + (n-1)*E, E);
     if (hidden) memcpy(hidden, rn_final, E * sizeof(float));
-    mm_t(logits, rn_final, w->head, 1, E, V);
+    matvec_t(logits, w->head, rn_final, V, E);
     for (int i = 0; i < V; i++) logits[i] = 15.0f * tanhf(logits[i] / 15.0f);
 
 
@@ -414,10 +431,10 @@ static void forward_token(Weights *w, int tok, int pos, float *logits, float *hi
 
         /* QKV projections */
         float qa[1024], ka[1024], va[1024], vra[1024];
-        mm_t(qa, rn, w->b[bl].cq, 1, E, E);
-        mm_t(ka, rn, w->b[bl].ck, 1, E, E);
-        mm_t(va, rn, w->b[bl].cv, 1, E, E);
-        mm_t(vra, rn, w->b[bl].wvr, 1, E, E);
+        matvec_t(qa, w->b[bl].cq, rn, E, E);
+        matvec_t(ka, w->b[bl].ck, rn, E, E);
+        matvec_t(va, w->b[bl].cv, rn, E, E);
+        matvec_t(vra, w->b[bl].wvr, rn, E, E);
 
         /* RoPE + QK-norm per head */
         for (int h = 0; h < H; h++) {
@@ -433,7 +450,7 @@ static void forward_token(Weights *w, int tok, int pos, float *logits, float *hi
 
         /* Echo */
         float echo_out[1024];
-        mm_t(echo_out, rn, w->b[bl].wj, 1, E, E);
+        matvec_t(echo_out, w->b[bl].wj, rn, E, E);
 
         /* Gate softmax */
         float gs[16][3];
@@ -508,7 +525,7 @@ static void forward_token(Weights *w, int tok, int pos, float *logits, float *hi
 
         /* Output projection + residual (x = x + attn_out) */
         float ao[1024];
-        mm_t(ao, cat, w->b[bl].cproj, 1, E, E);
+        matvec_t(ao, w->b[bl].cproj, cat, E, E);
         for (int e = 0; e < E; e++) x[e] += ao[e];
 
         /* Cache mid-layer for backout */
@@ -518,10 +535,10 @@ static void forward_token(Weights *w, int tok, int pos, float *logits, float *hi
         /* MLP: x = x + mlp(norm(x)) */
         rmsnorm(rn2, x, E);
         float mg[2048], mu[2048], mo[1024];
-        mm_t(mg, rn2, w->b[bl].wg, 1, E, M);
-        mm_t(mu, rn2, w->b[bl].wu, 1, E, M);
+        matvec_t(mg, w->b[bl].wg, rn2, M, E);
+        matvec_t(mu, w->b[bl].wu, rn2, M, E);
         for (int i = 0; i < M; i++) mg[i] = siluf(mg[i]) * mu[i];
-        mm_t(mo, mg, w->b[bl].wd, 1, M, E);
+        matvec_t(mo, w->b[bl].wd, mg, E, M);
         for (int e = 0; e < E; e++) x[e] += mo[e];
 
     }
@@ -532,7 +549,7 @@ static void forward_token(Weights *w, int tok, int pos, float *logits, float *hi
 
     rmsnorm(rn, x, E);
     if (hidden) memcpy(hidden, rn, E * sizeof(float));
-    mm_t(logits, rn, w->head, 1, E, V);
+    matvec_t(logits, w->head, rn, V, E);
 
     /* Softcap: logits = 15 * tanh(logits / 15) */
     for (int i = 0; i < V; i++)
