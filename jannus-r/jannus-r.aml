@@ -234,11 +234,13 @@ BLOOD COMPILE jannus_chain {
  */
 static int jannus_run_chain(Weights *w, const char *prompt,
                             JannusStep steps[JANNUS_NSTEPS], int *n_steps_out) {
-    /* Initialise field */
+    /* LOAD the breath of the field from prior chains before any
+     * RESET_FIELD — chambers, scars, prophecy debt, calendar snapshot
+     * carry across runs. Each new chain extends what the previous one
+     * left in the field. Missing file = first chain, silent fresh start. */
     am_init();
-    am_reset_field();
-    am_reset_debt();
     am_exec(
+        "LOAD \"../weights/yent_v4/jannus-r.soma\"\n"
         "PROPHECY 12\n"
         "DESTINY 0.35\n"
         "VELOCITY WALK\n"
@@ -424,6 +426,10 @@ int main(int argc, char **argv) {
 
     jannus_display(prompt, steps, n_steps, spa_scores);
     fprintf(stderr, "\n[jannus-r] %d steps in %.2fs\n", n_steps, el);
+
+    /* SAVE the breath the chain left in the field — next chain inherits. */
+    am_exec("SAVE \"../weights/yent_v4/jannus-r.soma\"\n");
+    fprintf(stderr, "[jannus-r] field state saved → ../weights/yent_v4/jannus-r.soma\n");
 
     spa_free(&g_jannus_spa);
     yent_free(&w);

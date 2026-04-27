@@ -168,10 +168,13 @@ static int yent_init(const char *gguf_path, Weights *w) {
      *   FIELD     — turn the field on
      *   RESONANCE — set baseline coupling strength
      */
+    /* Init the runtime, then LOAD prior breath from disk before any
+     * RESET_FIELD — so chambers, scars, prophecy debt, calendar drift,
+     * etc. carry across sessions like Klaus's klaus.soma does. Missing
+     * file = first run, silent start-fresh. */
     am_init();
-    am_reset_field();
-    am_reset_debt();
     int rc = am_exec(
+        "LOAD \"weights/yent_v4/yent.soma\"\n"
         "PROPHECY 12\n"
         "DESTINY 0.35\n"
         "VELOCITY WALK\n"
@@ -259,6 +262,11 @@ static void yent_generate(Weights *w, const char *prompt,
     fprintf(stderr, "\n[yent] %d tokens, %.1f tok/s (%.2fs)\n",
             gen, gen / el, el);
 
+    /* SAVE the breath of the field so the next run starts where this
+     * one left off — chambers, scars, prophecy debt, calendar snapshot. */
+    am_exec("SAVE \"weights/yent_v4/yent.soma\"\n");
+    fprintf(stderr, "[yent] field state saved → weights/yent_v4/yent.soma\n");
+
     free(logits);
     free(hidden);
     free(kv_k);
@@ -270,7 +278,7 @@ static void yent_generate(Weights *w, const char *prompt,
 
 BLOOD MAIN {
 int main(int argc, char **argv) {
-    const char *gguf_path = "weights/yent_v4_sft_q8_0.gguf";
+    const char *gguf_path = "weights/yent_v4/yent_v4_sft_q8_0.gguf";
     const char *prompt    = "Q: Who are you?\nA:";
     int max_tokens        = 80;
     float temp            = 0.7f;
