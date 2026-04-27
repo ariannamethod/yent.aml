@@ -8,6 +8,9 @@ weights/*.bin
 weights/*.gguf
 weights/*.pt
 weights/*.pkl
+weights/*.soma
+# also ignore everything under weights/ (symlinks to ~/Downloads/...)
+weights/*
 
 # Python
 __pycache__/
