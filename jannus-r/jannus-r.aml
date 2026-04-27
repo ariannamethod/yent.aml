@@ -36,6 +36,7 @@ ECHO "../tools/janus_v4_bpe_merges.h"
 ECHO "../tools/yent_forward.h"
 ECHO "tools/jannus_calendar.h"
 ECHO "tools/jannus_spa.h"
+ECHO "tools/jannus_split.h"
 
 PROPHECY 12
 DESTINY 0.35
@@ -256,11 +257,10 @@ static int jannus_run_chain(Weights *w, const char *prompt,
     /* Approximate debt — first step uses 0, updated via am_compute_prophecy_debt */
     float debt0 = 0.0f;
 
-    int   nb = (int)((float)JANNUS_NSTEPS * (0.3f + 0.4f * debt0 + 0.1f * cal_diss));
-    if (nb < 1) nb = 1;
-    if (nb >= JANNUS_NSTEPS) nb = JANNUS_NSTEPS - 1;
-    int   nf = JANNUS_NSTEPS - nb;
-    float tb = 0.7f + 0.3f * (0.5f + 0.3f * cal_diss + 0.2f * debt0);
+    JannusSplit sp = jannus_compute_split(debt0, cal_diss, JANNUS_NSTEPS);
+    int   nb = sp.nb;
+    int   nf = sp.nf;
+    float tb = sp.tb;
 
     fprintf(stderr,
         "[jannus-r] cal_diss=%.3f personal_diss=%.3f debt=%.3f → "
@@ -295,7 +295,7 @@ static int jannus_run_chain(Weights *w, const char *prompt,
         st->direction   = +1;
         st->wormhole    = 0;
         st->len         = 0;
-        st->temp        = tb * (1.0f - 0.02f * (float)s);
+        st->temp        = jannus_temp_forward(tb, s);
         st->debt_at_step = 0.0f;
         st->diss_at_step = cal_diss;
 
@@ -326,7 +326,7 @@ static int jannus_run_chain(Weights *w, const char *prompt,
         st->direction   = -1;
         st->wormhole    = 0;
         st->len         = 0;
-        st->temp        = tb * (1.0f + 0.05f * (float)s);
+        st->temp        = jannus_temp_backward(tb, s);
         st->debt_at_step = 0.0f;
         st->diss_at_step = cal_diss;
 

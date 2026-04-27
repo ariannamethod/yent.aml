@@ -4,8 +4,9 @@
 # Runs (in order):
 #   1. cc test_calendar.c → run               (no deps)
 #   2. cc test_spa.c → run                    (no deps)
-#   3. amlc jannus-r.aml → compile only       (skip if amlc missing)
-#   4. ./jannus-r if Q8 weights are present   (optional)
+#   3. cc test_split.c → run                  (no deps)
+#   4. amlc jannus-r.aml → compile only       (skip if amlc missing)
+#   5. ./jannus-r if Q8 weights are present   (optional)
 #
 # Each step prints PASS/FAIL/SKIP and exits non-zero on FAIL.
 
@@ -24,7 +25,12 @@ cc -O2 -Wall -Wextra tests/test_spa.c -o tests/test_spa -lm
 ./tests/test_spa
 echo "  PASS [spa suite]"
 
-# 3. amlc compile
+# 3. Split (chain heart)
+cc -O2 -Wall -Wextra tests/test_split.c -o tests/test_split -lm
+./tests/test_split
+echo "  PASS [split suite]"
+
+# 4. amlc compile
 if ! command -v amlc >/dev/null 2>&1; then
     echo "  SKIP [amlc compile] — amlc not installed"
 else
@@ -35,7 +41,7 @@ else
     echo "  PASS [amlc compile] jannus-r_smoke ($(wc -c < jannus-r_smoke) bytes)"
 fi
 
-# 4. Generation if weights present
+# 5. Generation if weights present
 GGUF="../weights/yent_v4/yent_v4_sft_q8_0.gguf"
 if [ -x jannus-r_smoke ] && [ -f "$GGUF" ]; then
     OUT=$(./jannus-r_smoke -w "$GGUF" -p "ping" 2>&1)
@@ -49,6 +55,6 @@ else
 fi
 
 # Cleanup
-rm -f tests/test_calendar tests/test_spa jannus-r_smoke jannus-r_smoke.c
+rm -f tests/test_calendar tests/test_spa tests/test_split jannus-r_smoke jannus-r_smoke.c
 echo
 echo "smoke OK"
