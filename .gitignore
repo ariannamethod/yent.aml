@@ -22,3 +22,9 @@ jannus-r/jannus-r
 jannus-r/jannus-r.c
 jannus-r/jannus-r_smoke
 jannus-r/jannus-r_smoke.c
+
+# web/ tests build artefacts
+web/tests/mini.gguf
+web/tests/mini.bin
+web/tests/mini_expect.json
+web/tests/bpe_parity
